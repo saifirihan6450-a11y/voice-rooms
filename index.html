@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="hi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#6c3ce9">
+<title>Voice Rooms</title>
+<style>
+  :root { --bg:#14111f; --card:#211c33; --pri:#6c3ce9; --txt:#f2effa; --mut:#9a93b3; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { margin:0; background:var(--bg); color:var(--txt); font-family:system-ui,sans-serif; min-height:100vh; }
+  .screen { display:none; padding:16px; padding-bottom:90px; max-width:520px; margin:0 auto; }
+  .screen.on { display:block; }
+  h1,h2 { margin:8px 0 16px; }
+  input { width:100%; padding:14px; border-radius:12px; border:1px solid #3a3358; background:var(--card); color:var(--txt); font-size:16px; }
+  button { background:var(--pri); color:#fff; border:0; border-radius:12px; padding:14px 18px; font-size:16px; font-weight:600; }
+  button.sec { background:var(--card); }
+  button:disabled { opacity:.5; }
+  .full { width:100%; margin-top:12px; }
+  .top { display:flex; justify-content:space-between; align-items:center; }
+  .coins { background:var(--card); padding:8px 14px; border-radius:20px; font-weight:600; }
+  .room { background:var(--card); border-radius:14px; padding:14px; margin-bottom:10px; }
+  .room small { color:var(--mut); }
+  .grid { display:grid; grid-template-columns:repeat(4,1fr); gap:16px 8px; margin:20px 0; }
+  .seat { text-align:center; font-size:12px; }
+  .av { width:58px; height:58px; border-radius:50%; margin:0 auto 4px; background:var(--card); display:flex; align-items:center; justify-content:center; font-size:22px; border:3px solid transparent; }
+  .av.me { background:#3b2b78; }
+  .av.speak { border-color:#34d399; }
+  .bar { position:fixed; left:0; right:0; bottom:0; padding:12px 16px calc(12px + env(safe-area-inset-bottom)); background:#0f0c18; display:flex; gap:10px; justify-content:center; }
+  .sheet { position:fixed; inset:0; background:#000a; display:none; align-items:flex-end; z-index:10; }
+  .sheet.on { display:flex; }
+  .sheet > div { background:var(--card); width:100%; border-radius:20px 20px 0 0; padding:16px 16px 28px; }
+  .gift { display:flex; justify-content:space-between; padding:14px 4px; border-bottom:1px solid #3a3358; }
+  #toast { position:fixed; top:14px; left:50%; transform:translateX(-50%); background:#fff; color:#111; padding:10px 16px; border-radius:20px; display:none; z-index:20; font-weight:600; max-width:90%; }
+  .hint { color:var(--mut); font-size:13px; text-align:center; }
+</style>
+</head>
+<body>
+
+<div id="login" class="screen on">
+  <h1 style="margin-top:80px">🎙️ Voice Rooms</h1>
+  <p class="hint" style="text-align:left">Seat par baitho, baat karo, gifts bhejo.</p>
+  <input id="name" placeholder="Apna naam" maxlength="20">
+  <button class="full" id="loginBtn">Start</button>
+</div>
+
+<div id="home" class="screen">
+  <div class="top"><h2>Rooms</h2><div class="coins" id="coinsHome">🪙 0</div></div>
+  <div id="roomList"></div>
+  <p class="hint" id="empty">Abhi koi room nahi. Pehla room banao!</p>
+  <div class="bar"><button id="newRoom" style="flex:1">+ Room banao</button><button class="sec" id="refresh">↻</button></div>
+</div>
+
+<div id="room" class="screen">
+  <div class="top"><h2 id="roomTitle">…</h2><div class="coins" id="coinsRoom">🪙 0</div></div>
+  <div class="grid" id="seats"></div>
+  <p class="hint" id="roomHint">Khali seat par tap karo. Kisi baithe hue par tap karke gift bhejo.</p>
+  <div class="bar">
+    <button class="sec" id="back">← Bahar</button>
+    <button id="mic" style="flex:1">🔇 Mic off</button>
+  </div>
+</div>
+
+<div class="sheet" id="giftSheet"><div>
+  <h3 id="giftTo" style="margin-top:0"></h3>
+  <div id="giftList"></div>
+  <button class="sec full" id="giftClose">Band karo</button>
+</div></div>
+
+<div id="toast"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/livekit-client/dist/livekit-client.umd.min.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+let token = null, me = null, roomId = null, room = null, lk = null, poll = null;
+let micOn = false, wasOnSeat = false, GIFTS = {};
+const GIFT_ICON = { rose:'🌹', heart:'💖', car:'🚗', castle:'🏰' };
+
+function toast(m) { const t = $('toast'); t.textContent = m; t.style.display = 'block'; setTimeout(() => t.style.display = 'none', 2500); }
+function show(id) { document.querySelectorAll('.screen').forEach(s => s.classList.remove('on')); $(id).classList.add('on'); }
+
+async function api(path, method = 'GET', body) {
+  const r = await fetch(path, { method, headers: { 'Content-Type':'application/json', ...(token ? { Authorization:'Bearer ' + token } : {}) }, body: body ? JSON.stringify(body) : undefined });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || 'Error');
+  return j;
+}
+
+$('loginBtn').onclick = async () => {
+  const name = $('name').value.trim();
+  if (!name) return toast('Naam likho');
+  try {
+    const r = await api('/auth/login', 'POST', { name });
+    token = r.token; me = r.user;
+    GIFTS = await api('/gifts');
+    goHome();
+  } catch (e) { toast(e.message); }
+};
+
+async function goHome() {
+  show('home');
+  await loadHome();
+}
+async function loadHome() {
+  try {
+    me = await api('/me');
+    $('coinsHome').textContent = '🪙 ' + me.coins;
+    const rooms = await api('/rooms');
+    $('empty').style.display = rooms.length ? 'none' : 'block';
+    $('roomList').innerHTML = '';
+    rooms.forEach(r => {
+      const n = r.seats.filter(Boolean).length;
+      const d = document.createElement('div');
+      d.className = 'room';
+      d.innerHTML = `<b></b><br><small>${n}/8 seats bhari</small>`;
+      d.querySelector('b').textContent = r.title;
+      d.onclick = () => joinRoom(r.id);
+      $('roomList').appendChild(d);
+    });
+  } catch (e) { toast(e.message); }
+}
+$('refresh').onclick = loadHome;
+$('newRoom').onclick = async () => {
+  const title = prompt('Room ka naam?');
+  if (title === null) return;
+  try { const r = await api('/rooms', 'POST', { title }); joinRoom(r.id); } catch (e) { toast(e.message); }
+};
+
+async function joinRoom(id) {
+  roomId = id; wasOnSeat = false; micOn = false;
+  show('room');
+  await loadRoom();
+  await connectVoice();
+  poll = setInterval(loadRoom, 2500);
+}
+
+function onSeat() { return room && room.seats.some(s => s && s.userId === me.id); }
+
+async function loadRoom() {
+  try {
+    room = await api('/rooms/' + roomId);
+    me = await api('/me');
+    $('roomTitle').textContent = room.title;
+    $('coinsRoom').textContent = '🪙 ' + me.coins;
+    renderSeats();
+    const now = onSeat();
+    if (now !== wasOnSeat) { wasOnSeat = now; await connectVoice(); }
+  } catch (e) { toast(e.message); }
+}
+
+function renderSeats() {
+  $('seats').innerHTML = '';
+  room.seats.forEach((s, i) => {
+    const d = document.createElement('div');
+    d.className = 'seat';
+    const isMe = s && s.userId === me.id;
+    d.innerHTML = `<div class="av ${isMe ? 'me' : ''}" data-uid="${s ? s.userId : ''}">${s ? '' : '💺'}</div><div></div>`;
+    if (s) {
+      d.querySelector('.av').textContent = s.name[0].toUpperCase();
+      d.lastChild.textContent = s.name + (s.userId === room.hostId ? ' 👑' : '');
+    } else d.lastChild.textContent = i + 1;
+    d.onclick = () => seatTap(i, s);
+    $('seats').appendChild(d);
+  });
+  updateMicBtn();
+}
+
+async function seatTap(i, s) {
+  try {
+    if (!s) { await api(`/rooms/${roomId}/seat`, 'POST', { seat: i }); }
+    else if (s.userId === me.id) { await api(`/rooms/${roomId}/leave-seat`, 'POST'); }
+    else return openGift(s);
+    await loadRoom();
+  } catch (e) { toast(e.message); }
+}
+
+async function connectVoice() {
+  try {
+    if (lk) { await lk.disconnect(); lk = null; }
+    const t = await api(`/rooms/${roomId}/token`);
+    lk = new LivekitClient.Room({ adaptiveStream: true });
+    lk.on(LivekitClient.RoomEvent.TrackSubscribed, (track) => {
+      if (track.kind === 'audio') { const el = track.attach(); el.style.display = 'none'; document.body.appendChild(el); }
+    });
+    lk.on(LivekitClient.RoomEvent.TrackUnsubscribed, (track) => track.detach().forEach(e => e.remove()));
+    lk.on(LivekitClient.RoomEvent.ActiveSpeakersChanged, (speakers) => {
+      document.querySelectorAll('.av').forEach(a => a.classList.remove('speak'));
+      speakers.forEach(sp => { const a = document.querySelector(`.av[data-uid="${sp.identity}"]`); if (a) a.classList.add('speak'); });
+    });
+    await lk.connect(t.url, t.token);
+    await lk.startAudio();
+    micOn = false;
+    updateMicBtn();
+  } catch (e) { toast('Voice connect nahi hua: ' + e.message); }
+}
+
+function updateMicBtn() {
+  const b = $('mic');
+  if (!onSeat()) { b.textContent = '👂 Sirf sun rahe ho'; b.disabled = true; return; }
+  b.disabled = false;
+  b.textContent = micOn ? '🎙️ Mic on' : '🔇 Mic off';
+}
+
+$('mic').onclick = async () => {
+  if (!onSeat() || !lk) return;
+  try {
+    micOn = !micOn;
+    await lk.localParticipant.setMicrophoneEnabled(micOn);
+    updateMicBtn();
+  } catch (e) { micOn = false; updateMicBtn(); toast('Mic permission allow karo'); }
+};
+
+$('back').onclick = async () => {
+  clearInterval(poll);
+  if (lk) { await lk.disconnect(); lk = null; }
+  document.querySelectorAll('audio').forEach(a => a.remove());
+  goHome();
+};
+
+function openGift(s) {
+  $('giftTo').textContent = s.name + ' ko gift bhejo';
+  $('giftList').innerHTML = '';
+  Object.entries(GIFTS).forEach(([id, g]) => {
+    const d = document.createElement('div');
+    d.className = 'gift';
+    d.innerHTML = `<span>${GIFT_ICON[id] || '🎁'} ${g.name}</span><span>🪙 ${g.price}</span>`;
+    d.onclick = async () => {
+      $('giftSheet').classList.remove('on');
+      try { const r = await api('/gifts/send', 'POST', { toUserId: s.userId, giftId: id }); $('coinsRoom').textContent = '🪙 ' + r.coins; toast(r.gift + ' bhej diya! 🎉'); }
+      catch (e) { toast(e.message); }
+    };
+    $('giftList').appendChild(d);
+  });
+  $('giftSheet').classList.add('on');
+}
+$('giftClose').onclick = () => $('giftSheet').classList.remove('on');
+
+['coinsHome', 'coinsRoom'].forEach(id => $(id).onclick = async () => {
+  try { const r = await api('/coins/demo-recharge', 'POST'); me.coins = r.coins; $('coinsHome').textContent = $('coinsRoom').textContent = '🪙 ' + r.coins; toast('+100 demo coins'); }
+  catch (e) { toast(e.message); }
+});
+</script>
+</body>
+</html>
